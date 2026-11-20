@@ -1,7 +1,7 @@
 services:
   comfyui:
-    build: .
-    image: comfyui:local
+    image: ghcr.io/clems4ever/mycomfyui:latest
+    # To build from source instead, replace the line above with: build: .
     ports:
       - "8188:8188"
     environment:

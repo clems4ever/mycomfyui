@@ -17,10 +17,11 @@ Needs an NVIDIA driver and the
 docker compose up -d
 ```
 
-Then open http://localhost:8188. Models, outputs and settings are kept in `./data`.
+This pulls `ghcr.io/clems4ever/mycomfyui:latest`, which is rebuilt on every push to
+`main`. Then open http://localhost:8188. Models, outputs and settings are kept in `./data`.
 
-To skip the build, use the published image: set `image: ghcr.io/clems4ever/mycomfyui:latest`
-instead of `build: .` in `docker-compose.yml`.
+To update, run `docker compose pull && docker compose up -d`. To build from source
+instead, replace the `image:` line in `docker-compose.yml` with `build: .`.
 
 ## Model Manager
 
