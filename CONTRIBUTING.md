@@ -23,7 +23,7 @@ docker build --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu -t
 mkdir -p data/models/{checkpoints,loras,vae} data/user
 docker run -d --name comfyui -p 8188:8188 -v "$PWD/data/models:/opt/ComfyUI/models" \
   -v "$PWD/data/user:/opt/ComfyUI/user" mycomfyui:ci \
-  python main.py --listen 0.0.0.0 --port 8188 --enable-manager --cpu
+  python main.py --listen 0.0.0.0 --port 8188 --enable-manager --enable-assets --cpu
 playwright install chromium
 pytest tests/e2e
 ```

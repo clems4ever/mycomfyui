@@ -28,4 +28,6 @@ COPY extra_model_paths.yaml /opt/ComfyUI/extra_model_paths.yaml
 
 EXPOSE 8188
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["python", "main.py", "--listen", "0.0.0.0", "--port", "8188", "--enable-manager"]
+# --enable-assets keeps the Assets panel's "Generated" list in user/comfyui.db; without it
+# the list comes from in-memory job history and is empty after every restart.
+CMD ["python", "main.py", "--listen", "0.0.0.0", "--port", "8188", "--enable-manager", "--enable-assets"]

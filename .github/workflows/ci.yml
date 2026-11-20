@@ -100,7 +100,7 @@ jobs:
             -v "$PWD/data/input:/opt/ComfyUI/input" \
             -v "$PWD/data/output:/opt/ComfyUI/output" \
             -v "$PWD/data/user:/opt/ComfyUI/user" \
-            mycomfyui:ci python main.py --listen 0.0.0.0 --port 8188 --enable-manager --cpu
+            mycomfyui:ci python main.py --listen 0.0.0.0 --port 8188 --enable-manager --enable-assets --cpu
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
