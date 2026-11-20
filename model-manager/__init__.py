@@ -6,6 +6,7 @@ browser, which saves the file on the client machine. Here the server fetches it
 instead, so it lands in the right folder no matter where the browser runs.
 """
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -32,13 +33,19 @@ LEGACY_FOLDERS = {"unet", "clip"}
 CHUNK_SIZE = 4 * 1024 * 1024
 MAX_PARALLEL = 2
 PROGRESS_INTERVAL = 0.5
+SAVE_INTERVAL = 5
+FINISHED_HISTORY = 50
 ACTIVE = ("queued", "downloading")
+PERSISTED = ("id", "url", "directory", "name", "status", "downloaded", "total", "error", "created", "finished")
+# The download list survives restarts; it lives in the user directory, which is a volume.
+STATE_FILE = os.path.join(folder_paths.get_user_directory(), "__model_manager", "downloads.json")
 
 log = logging.getLogger("model-manager")
 server = PromptServer.instance
 routes = server.routes
 jobs = {}
 _slots = None
+_last_save = 0
 
 
 class Paused(Exception):
@@ -101,6 +108,70 @@ def _broadcast(job=None, force=True):
             return
         job["_last_sent"] = now
     server.send_sync("model_manager.jobs", {"jobs": [_public(j) for j in jobs.values()]})
+    _save(force=force or job is None)
+
+
+def _save(force=True):
+    """Write the download list to disk; progress-only updates are throttled."""
+    global _last_save
+    now = time.monotonic()
+    if not force and now - _last_save < SAVE_INTERVAL:
+        return
+    _last_save = now
+    finished = sorted((j for j in jobs.values() if j["status"] in ("done", "cancelled")),
+                      key=lambda j: j["finished"] or j["created"], reverse=True)
+    dropped = {j["id"] for j in finished[FINISHED_HISTORY:]}
+    records = [{k: j[k] for k in PERSISTED} for j in jobs.values() if j["id"] not in dropped]
+    try:
+        os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(records, f)
+        os.replace(tmp, STATE_FILE)
+    except OSError as e:
+        log.error("Could not save download list: %s", e)
+
+
+def _new_job(url, directory, name, path, **fields):
+    job = {"id": uuid.uuid4().hex, "url": url, "directory": directory, "name": name, "path": path,
+           "status": "queued", "downloaded": 0, "total": None, "speed": 0, "error": None,
+           "created": time.time(), "finished": None, "task": None, "_last_sent": 0}
+    job.update(fields)
+    return job
+
+
+def _load():
+    """Restore the download list saved before the last shutdown.
+
+    Returns the jobs that were queued or downloading, to be restarted once the
+    server is up. Paused and failed downloads stay as they were.
+    """
+    try:
+        with open(STATE_FILE) as f:
+            records = json.load(f)
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as e:
+        log.error("Could not read saved download list: %s", e)
+        return []
+    to_resume = []
+    for rec in records:
+        try:
+            url, directory, name, path = _validate(rec)
+        except (ValueError, AttributeError):
+            continue
+        fields = {k: rec[k] for k in PERSISTED if k in rec and k not in ("url", "directory", "name")}
+        job = _new_job(url, directory, name, path, **fields)
+        part = path + ".part"
+        if job["status"] not in ("done", "cancelled") and os.path.exists(path):
+            job.update(status="done", finished=job["finished"] or time.time())
+        elif os.path.exists(part):
+            job["downloaded"] = os.path.getsize(part)
+        if job["status"] in ACTIVE:
+            job["status"] = "queued"
+            to_resume.append(job)
+        jobs[job["id"]] = job
+    return to_resume
 
 
 def _models_root():
@@ -264,9 +335,7 @@ async def download(request):
                 await _start(existing)
                 started.append(existing["id"])
             continue
-        job = {"id": uuid.uuid4().hex, "url": url, "directory": directory, "name": name, "path": path,
-               "status": "queued", "downloaded": 0, "total": model.get("size"), "speed": 0,
-               "error": None, "created": time.time(), "finished": None, "task": None, "_last_sent": 0}
+        job = _new_job(url, directory, name, path, total=model.get("size"))
         jobs[job["id"]] = job
         await _start(job)
         started.append(job["id"])
@@ -361,3 +430,16 @@ async def delete_model(request):
     await asyncio.to_thread(os.remove, real)
     log.info("Deleted model %s (%d bytes)", real, size)
     return web.json_response({"ok": True, "freed": size})
+
+
+_resume_after_restart = _load()
+
+
+async def _resume_downloads(app):
+    if _resume_after_restart:
+        log.info("Resuming %d download(s) interrupted by the last shutdown", len(_resume_after_restart))
+    for job in _resume_after_restart:
+        await _start(job)
+
+
+server.app.on_startup.append(_resume_downloads)

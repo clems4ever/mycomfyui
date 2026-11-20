@@ -45,9 +45,12 @@ own "Download" buttons save files in the browser instead.
 - Installed models grouped by folder, with search, sorting, "in use" badges for
   the open workflow, and delete.
 
-Downloads are limited to Hugging Face and Civitai. The download list is kept in
-memory, so it resets when the container restarts; partial files are kept and
-continue when the same download is started again.
+- Survives restarts: the download list is saved in
+  `data/user/__model_manager/downloads.json`, and downloads that were running or
+  queued resume automatically from their partial files when the server comes back.
+  Paused and failed downloads stay as they were.
+
+Downloads are limited to Hugging Face and Civitai.
 
 ## Security
 
