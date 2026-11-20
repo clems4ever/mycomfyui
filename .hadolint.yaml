@@ -1,0 +1,4 @@
+ignored:
+  # apt and pip packages track the base image and ComfyUI's own requirements files.
+  - DL3008
+  - DL3013

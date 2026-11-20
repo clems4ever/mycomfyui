@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Same ComfyUI version the Dockerfile builds by default.
+  COMFYUI_REF: master
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Ruff
+        run: |
+          ruff check --output-format=github .
+          ruff format --check .
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: ESLint
+        run: npm run lint
+      - name: ShellCheck
+        run: shellcheck entrypoint.sh
+      - name: Hadolint
+        uses: hadolint/hadolint-action@v3.5.0
+        with:
+          dockerfile: Dockerfile
+      - name: actionlint
+        run: |
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12
+          ./actionlint -color
+
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check out ComfyUI
+        uses: actions/checkout@v7
+        with:
+          repository: comfyanonymous/ComfyUI
+          ref: ${{ env.COMFYUI_REF }}
+          path: ComfyUI
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Python tests
+        run: pytest
+        env:
+          COMFYUI_PATH: ComfyUI
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: JavaScript tests
+        run: npm test
+
+  e2e:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - name: Build image (CPU PyTorch; the runner has no GPU)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: mycomfyui:ci
+          build-args: TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+          cache-from: type=gha,scope=cpu
+          cache-to: type=gha,mode=max,scope=cpu
+      - name: Start ComfyUI
+        run: |
+          # Created here so they belong to the runner user and tests can write into them.
+          mkdir -p data/models/{checkpoints,loras,vae} data/{custom_nodes,input,output,user}
+          docker run -d --name comfyui -p 8188:8188 \
+            -v "$PWD/data/models:/opt/ComfyUI/models" \
+            -v "$PWD/data/custom_nodes:/opt/ComfyUI/custom_nodes" \
+            -v "$PWD/data/input:/opt/ComfyUI/input" \
+            -v "$PWD/data/output:/opt/ComfyUI/output" \
+            -v "$PWD/data/user:/opt/ComfyUI/user" \
+            mycomfyui:ci python main.py --listen 0.0.0.0 --port 8188 --enable-manager --cpu
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install test dependencies
+        run: |
+          pip install -r requirements-dev.txt
+          playwright install --with-deps chromium
+      - name: End-to-end tests
+        run: pytest tests/e2e
+        env:
+          COMFYUI_URL: http://localhost:8188
+          DATA_DIR: data
+      - name: ComfyUI logs
+        if: failure()
+        run: docker logs comfyui
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-screenshots
+          path: e2e-screenshots/
+          if-no-files-found: ignore

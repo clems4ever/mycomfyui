@@ -1,5 +1,8 @@
 # mycomfyui
 
+[![CI](https://github.com/clems4ever/mycomfyui/actions/workflows/ci.yml/badge.svg)](https://github.com/clems4ever/mycomfyui/actions/workflows/ci.yml)
+[![Publish image](https://github.com/clems4ever/mycomfyui/actions/workflows/publish.yml/badge.svg)](https://github.com/clems4ever/mycomfyui/actions/workflows/publish.yml)
+
 [ComfyUI](https://github.com/comfyanonymous/ComfyUI) in Docker for NVIDIA GPUs, with
 ComfyUI-Manager enabled and a built-in **Model Manager** panel.
 
@@ -14,6 +17,13 @@ docker compose up -d --build
 
 Open http://localhost:8188. Models, custom nodes, inputs, outputs and settings are
 stored under `./data/`, so they survive rebuilds.
+
+### Prebuilt image
+
+Every push to `main` that passes CI publishes the CUDA image to
+`ghcr.io/clems4ever/mycomfyui`, tagged `latest` and `sha-<commit>`. To use it instead
+of building locally, replace `build: .` with
+`image: ghcr.io/clems4ever/mycomfyui:latest` in `docker-compose.yml`.
 
 ### Build options
 
@@ -60,6 +70,49 @@ ComfyUI-Manager runs in `personal_cloud` mode (set on first start in
 and download or delete models. Keep it on a trusted network, or put an
 authenticating reverse proxy in front of it.
 
+## Development
+
+```sh
+pip install -r requirements-dev.txt
+npm ci
+
+# Lint
+ruff check . && ruff format --check .
+npm run lint
+shellcheck entrypoint.sh    # also checked in CI: hadolint (Dockerfile), actionlint (workflows)
+
+# Unit tests
+git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git   # the Python tests use its folder_paths module
+pytest
+npm test
+```
+
+The Python tests run the extension against ComfyUI's real model-folder code, with a
+local file server standing in for Hugging Face. They cover validation, downloads,
+pause/resume with HTTP ranges, cancel, dropped connections, disk-space checks, the
+download queue, storage listing, deletion and resuming after a restart.
+
+End-to-end tests drive the UI with Playwright against a running container:
+
+```sh
+docker build --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu -t mycomfyui:ci .
+mkdir -p data/models/{checkpoints,loras,vae} data/{custom_nodes,input,output,user}
+docker run -d --name comfyui -p 8188:8188 -v "$PWD/data/models:/opt/ComfyUI/models" \
+  -v "$PWD/data/user:/opt/ComfyUI/user" mycomfyui:ci \
+  python main.py --listen 0.0.0.0 --port 8188 --enable-manager --cpu
+playwright install chromium
+pytest tests/e2e
+```
+
+One end-to-end test downloads a 0.5 MB model from Hugging Face, so it needs internet access.
+
+### CI
+
+`.github/workflows/ci.yml` runs on every push and pull request: lint, unit tests,
+and the end-to-end tests against a CPU build of the image (GitHub's runners have no
+GPU). `.github/workflows/publish.yml` builds the CUDA image and pushes it to GHCR
+after CI succeeds on `main`.
+
 ## Layout
 
 | Path | What it is |
@@ -69,3 +122,5 @@ authenticating reverse proxy in front of it.
 | `entrypoint.sh` | Seeds the ComfyUI-Manager config on first start |
 | `extra_model_paths.yaml` | Loads built-in nodes from outside the `custom_nodes` volume |
 | `model-manager/` | The Model Manager extension (server routes + sidebar panel) |
+| `tests/python/`, `tests/js/`, `tests/e2e/` | Unit tests (server and panel logic) and browser tests |
+| `.github/workflows/` | CI and image publishing |
