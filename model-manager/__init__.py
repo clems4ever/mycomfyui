@@ -5,6 +5,7 @@ The built-in "Download" buttons in the Missing Models panel hand the URL to the
 browser, which saves the file on the client machine. Here the server fetches it
 instead, so it lands in the right folder no matter where the browser runs.
 """
+
 import asyncio
 import json
 import logging
@@ -15,9 +16,8 @@ import uuid
 from urllib.parse import urlparse
 
 import aiohttp
-from aiohttp import web
-
 import folder_paths
+from aiohttp import web
 from server import PromptServer
 
 WEB_DIRECTORY = "./web"
@@ -25,6 +25,7 @@ NODE_CLASS_MAPPINGS = {}
 
 # Same sources the frontend's own Download button accepts.
 ALLOWED_HOSTS = ("huggingface.co", "civitai.com", "civitai.red")
+ALLOWED_SCHEMES = ("https",)
 ALLOWED_EXTENSIONS = (".safetensors", ".sft", ".ckpt", ".pth", ".pt", ".gguf")
 TOKEN_ENV = {"huggingface.co": "HF_TOKEN", "civitai.com": "CIVITAI_TOKEN", "civitai.red": "CIVITAI_TOKEN"}
 # Folder keys that aren't model folders, and legacy aliases of other keys.
@@ -71,7 +72,7 @@ def _validate(model):
     url, directory, name = model.get("url"), model.get("directory"), model.get("name")
     if not (isinstance(url, str) and isinstance(directory, str) and isinstance(name, str)):
         raise ValueError("model needs url, directory and name")
-    if urlparse(url).scheme != "https" or _host(url) not in ALLOWED_HOSTS:
+    if urlparse(url).scheme not in ALLOWED_SCHEMES or _host(url) not in ALLOWED_HOSTS:
         raise ValueError(f"{name}: only https downloads from {', '.join(ALLOWED_HOSTS)} are allowed")
     if not name.lower().endswith(ALLOWED_EXTENSIONS):
         raise ValueError(f"{name}: unsupported file type")
@@ -80,7 +81,7 @@ def _validate(model):
     try:
         base = folder_paths.get_folder_paths(directory)[0]
     except (KeyError, IndexError):
-        raise ValueError(f"{name}: unknown model folder '{directory}'")
+        raise ValueError(f"{name}: unknown model folder '{directory}'") from None
     base = os.path.abspath(base)
     target = os.path.abspath(os.path.join(base, name))
     if os.path.commonpath([base, target]) != base:
@@ -118,8 +119,11 @@ def _save(force=True):
     if not force and now - _last_save < SAVE_INTERVAL:
         return
     _last_save = now
-    finished = sorted((j for j in jobs.values() if j["status"] in ("done", "cancelled")),
-                      key=lambda j: j["finished"] or j["created"], reverse=True)
+    finished = sorted(
+        (j for j in jobs.values() if j["status"] in ("done", "cancelled")),
+        key=lambda j: j["finished"] if j["finished"] is not None else j["created"],
+        reverse=True,
+    )
     dropped = {j["id"] for j in finished[FINISHED_HISTORY:]}
     records = [{k: j[k] for k in PERSISTED} for j in jobs.values() if j["id"] not in dropped]
     try:
@@ -133,9 +137,22 @@ def _save(force=True):
 
 
 def _new_job(url, directory, name, path, **fields):
-    job = {"id": uuid.uuid4().hex, "url": url, "directory": directory, "name": name, "path": path,
-           "status": "queued", "downloaded": 0, "total": None, "speed": 0, "error": None,
-           "created": time.time(), "finished": None, "task": None, "_last_sent": 0}
+    job = {
+        "id": uuid.uuid4().hex,
+        "url": url,
+        "directory": directory,
+        "name": name,
+        "path": path,
+        "status": "queued",
+        "downloaded": 0,
+        "total": None,
+        "speed": 0,
+        "error": None,
+        "created": time.time(),
+        "finished": None,
+        "task": None,
+        "_last_sent": 0,
+    }
     job.update(fields)
     return job
 
@@ -184,8 +201,9 @@ def _disk_usage():
 
 
 def _remaining_bytes(exclude=None):
-    return sum(max((j["total"] or 0) - j["downloaded"], 0)
-               for j in jobs.values() if j["status"] in ACTIVE and j is not exclude)
+    return sum(
+        max((j["total"] or 0) - j["downloaded"], 0) for j in jobs.values() if j["status"] in ACTIVE and j is not exclude
+    )
 
 
 async def _remote_size(session, url):
@@ -199,8 +217,10 @@ async def _remote_size(session, url):
 def _describe_error(status, url):
     if status in (401, 403):
         env = TOKEN_ENV.get(_host(url), "a token")
-        return (f"Access denied (HTTP {status}). The model may be gated: accept its license on the "
-                f"website, then set {env} for the container.")
+        return (
+            f"Access denied (HTTP {status}). The model may be gated: accept its license on the "
+            f"website, then set {env} for the container."
+        )
     if status == 404:
         return "File not found at that URL (HTTP 404)."
     return f"Download failed (HTTP {status})."
@@ -227,40 +247,43 @@ async def _download(job):
             if offset:
                 headers["Range"] = f"bytes={offset}-"
             timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=300)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(job["url"], headers=headers) as resp:
-                    if resp.status == 206:
-                        mode = "ab"
-                    elif resp.status == 200:
-                        offset, mode = 0, "wb"  # server ignored the range; start over
-                    elif resp.status == 416 and offset:
-                        os.remove(part)  # stale partial file; retry from scratch
-                        raise RuntimeError("Partial file was out of date and has been removed. Retry to start over.")
-                    else:
-                        raise RuntimeError(_describe_error(resp.status, job["url"]))
-                    job["downloaded"] = offset
-                    if resp.content_length is not None:
-                        job["total"] = offset + resp.content_length
-                    needed = (job["total"] or 0) - offset + _remaining_bytes(exclude=job)
-                    free = _disk_usage()["free"]
-                    if job["total"] and needed > free:
-                        raise RuntimeError(f"Not enough disk space: downloads need {_fmt_gb(needed)}, "
-                                           f"only {_fmt_gb(free)} free.")
-                    _broadcast(job)
-                    job["_rate_mark"] = (time.monotonic(), offset)
-                    with open(part, mode) as f:
-                        async for chunk in resp.content.iter_chunked(CHUNK_SIZE):
-                            if job["status"] != "downloading":
-                                raise Paused()
-                            await asyncio.to_thread(f.write, chunk)
-                            job["downloaded"] += len(chunk)
-                            t0, b0 = job["_rate_mark"]
-                            now = time.monotonic()
-                            if now - t0 >= 1:
-                                rate = (job["downloaded"] - b0) / (now - t0)
-                                job["speed"] = rate if not job["speed"] else 0.6 * rate + 0.4 * job["speed"]
-                                job["_rate_mark"] = (now, job["downloaded"])
-                            _broadcast(job, force=False)
+            async with (
+                aiohttp.ClientSession(timeout=timeout) as session,
+                session.get(job["url"], headers=headers) as resp,
+            ):
+                if resp.status == 206:
+                    mode = "ab"
+                elif resp.status == 200:
+                    offset, mode = 0, "wb"  # server ignored the range; start over
+                elif resp.status == 416 and offset:
+                    os.remove(part)  # stale partial file; retry from scratch
+                    raise RuntimeError("Partial file was out of date and has been removed. Retry to start over.")
+                else:
+                    raise RuntimeError(_describe_error(resp.status, job["url"]))
+                job["downloaded"] = offset
+                if resp.content_length is not None:
+                    job["total"] = offset + resp.content_length
+                needed = (job["total"] or 0) - offset + _remaining_bytes(exclude=job)
+                free = _disk_usage()["free"]
+                if job["total"] and needed > free:
+                    raise RuntimeError(
+                        f"Not enough disk space: downloads need {_fmt_gb(needed)}, only {_fmt_gb(free)} free."
+                    )
+                _broadcast(job)
+                job["_rate_mark"] = (time.monotonic(), offset)
+                with open(part, mode) as f:
+                    async for chunk in resp.content.iter_chunked(CHUNK_SIZE):
+                        if job["status"] != "downloading":
+                            raise Paused()
+                        await asyncio.to_thread(f.write, chunk)
+                        job["downloaded"] += len(chunk)
+                        t0, b0 = job["_rate_mark"]
+                        now = time.monotonic()
+                        if now - t0 >= 1:
+                            rate = (job["downloaded"] - b0) / (now - t0)
+                            job["speed"] = rate if not job["speed"] else 0.6 * rate + 0.4 * job["speed"]
+                            job["_rate_mark"] = (now, job["downloaded"])
+                        _broadcast(job, force=False)
             if job["total"] and job["downloaded"] < job["total"]:
                 raise RuntimeError("Connection closed before the download finished. Resume to continue.")
             os.replace(part, job["path"])
@@ -271,6 +294,9 @@ async def _download(job):
         if job["status"] == "cancelled" and os.path.exists(part):
             os.remove(part)
         job["speed"] = 0
+    except (aiohttp.ClientPayloadError, aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
+        job.update(status="error", error="Connection lost during the download. Resume to continue.", speed=0)
+        log.error("Failed to download %s: %s", job["name"], e)
     except Exception as e:
         job.update(status="error", error=str(e) or type(e).__name__, speed=0)
         log.error("Failed to download %s: %s", job["name"], job["error"])
@@ -307,12 +333,18 @@ async def check(request):
             errors.append(str(e))
             continue
         if not _exists(directory, name):
-            missing.append({"url": url, "directory": directory, "name": name,
-                            "downloading": _job_for(path, ACTIVE + ("paused",)) is not None})
+            missing.append(
+                {
+                    "url": url,
+                    "directory": directory,
+                    "name": name,
+                    "downloading": _job_for(path, ACTIVE + ("paused",)) is not None,
+                }
+            )
     timeout = aiohttp.ClientTimeout(total=15)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         sizes = await asyncio.gather(*(_remote_size(session, m["url"]) for m in missing))
-    for model, size in zip(missing, sizes):
+    for model, size in zip(missing, sizes, strict=True):
         model["size"] = size
     return web.json_response({"missing": missing, "errors": errors})
 
@@ -405,12 +437,14 @@ def _list_models():
 @routes.get("/model_manager/storage")
 async def storage(request):
     models = await asyncio.to_thread(_list_models)
-    return web.json_response({
-        "disk": _disk_usage(),
-        "models_bytes": sum(m["size"] for m in models),
-        "pending_bytes": _remaining_bytes(),
-        "models": models,
-    })
+    return web.json_response(
+        {
+            "disk": _disk_usage(),
+            "models_bytes": sum(m["size"] for m in models),
+            "pending_bytes": _remaining_bytes(),
+            "models": models,
+        }
+    )
 
 
 @routes.post("/model_manager/models/delete")

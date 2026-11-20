@@ -1,0 +1,5 @@
+aiohttp>=3.9
+pytest>=8
+pytest-aiohttp>=1.0
+ruff==0.17.6
+pytest-playwright>=0.5

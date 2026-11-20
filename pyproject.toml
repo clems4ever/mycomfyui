@@ -1,0 +1,18 @@
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = ["ComfyUI"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "PT", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# Opening files and stat calls on the local models disk are quick; the large
+# writes during downloads already run in a thread.
+"model-manager/__init__.py" = ["ASYNC230", "ASYNC240"]
+"tests/**" = ["ASYNC230", "ASYNC240", "PT018"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests/python"]

@@ -3,3 +3,6 @@ data/
 # Tokens for gated models (HF_TOKEN, CIVITAI_TOKEN)
 .env
 __pycache__/
+ComfyUI/
+node_modules/
+e2e-screenshots/

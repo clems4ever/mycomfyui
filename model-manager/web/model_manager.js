@@ -1,14 +1,13 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
+import {
+  ACTIVE, collectModels, describeJob, formatBytes, namesInUse, sortJobs,
+} from "./model_manager_lib.js";
 
 const TAB_ID = "model-manager";
 const TOGGLE_COMMAND = `Workspace.ToggleSidebarTab.${TAB_ID}`;
 const DOWNLOAD_COMMAND = "ModelManager.DownloadMissing";
 const STORAGE_REFRESH_MS = 5000;
-// LiteGraph modes for muted and bypassed nodes, which don't need their models.
-const INACTIVE_MODES = new Set([2, 4]);
-const ACTIVE = new Set(["queued", "downloading"]);
-const STATUS_ORDER = { downloading: 0, queued: 1, paused: 2, error: 3, done: 4, cancelled: 5 };
 
 const state = {
   jobs: [],
@@ -40,22 +39,6 @@ function h(tag, attrs = {}, ...children) {
 }
 
 const icon = (name) => h("i", { class: `pi pi-${name}`, "aria-hidden": "true" });
-
-function formatBytes(n) {
-  if (n == null) return "?";
-  if (n >= 1e12) return `${(n / 1e12).toFixed(2)} TB`;
-  if (n >= 1e9) return `${(n / 1e9).toFixed(n >= 1e11 ? 0 : n >= 1e10 ? 1 : 2)} GB`;
-  if (n >= 1e6) return `${Math.round(n / 1e6)} MB`;
-  if (n >= 1e3) return `${Math.round(n / 1e3)} KB`;
-  return `${n} B`;
-}
-
-function formatDuration(seconds) {
-  if (!isFinite(seconds) || seconds <= 0) return "";
-  if (seconds < 60) return `${Math.ceil(seconds)} s`;
-  const m = Math.round(seconds / 60);
-  return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
-}
 
 function toast(severity, summary, detail, life = 5000) {
   app.extensionManager?.toast?.add({ severity, summary, detail, life });
@@ -94,41 +77,8 @@ function openPanel() {
 
 // ---------- workflow inspection ----------
 
-function workflowGraphs() {
-  const wf = (app.rootGraph ?? app.graph).serialize();
-  return [wf, ...(wf.definitions?.subgraphs ?? [])];
-}
-
-// Mirrors how the frontend finds a workflow's models: each node lists the models
-// it can use in properties.models, and only the ones selected in a widget count.
-export function collectModels(workflow) {
-  const found = new Map();
-  const add = (m) => {
-    if (m?.name && m?.url && m?.directory) found.set(`${m.directory}/${m.name}`, m);
-  };
-  const graphs = [workflow, ...(workflow.definitions?.subgraphs ?? [])];
-  for (const graph of graphs) {
-    for (const node of graph.nodes ?? []) {
-      if (INACTIVE_MODES.has(node.mode)) continue;
-      const values = Object.values(node.widgets_values ?? {});
-      for (const m of node.properties?.models ?? []) {
-        if (values.includes(m.name)) add(m);
-      }
-    }
-  }
-  for (const m of workflow.models ?? []) add(m);
-  return [...found.values()];
-}
-
-// File names selected anywhere in the open workflow, to flag models in use.
-function namesInUse() {
-  const names = new Set();
-  for (const graph of workflowGraphs()) {
-    for (const node of graph.nodes ?? []) {
-      for (const v of Object.values(node.widgets_values ?? {})) if (typeof v === "string") names.add(v);
-    }
-  }
-  return names;
+function currentWorkflow() {
+  return (app.rootGraph ?? app.graph).serialize();
 }
 
 // ---------- server state ----------
@@ -147,7 +97,7 @@ async function loadStorage() {
 }
 
 async function checkMissing() {
-  const models = collectModels((app.rootGraph ?? app.graph).serialize());
+  const models = collectModels(currentWorkflow());
   const result = models.length ? await request("/model_manager/check", { models }) : { missing: [], errors: [] };
   state.missing = result.missing;
   renderMissing();
@@ -329,26 +279,11 @@ function updateJobElement(el, job) {
   name.title = `${job.directory}/${job.name}`;
   el.querySelector(".mm-chip").textContent = job.directory;
 
-  const frac = job.total ? Math.min(job.downloaded / job.total, 1) : 0;
-  const fill = el.querySelector(".mm-progress-fill");
-  fill.style.width = `${(job.status === "done" ? 1 : frac) * 100}%`;
-  el.querySelector(".mm-progress").setAttribute("aria-valuenow", Math.round(frac * 100));
-
-  const sizes = !job.downloaded ? "" : job.total ? `${formatBytes(job.downloaded)} of ${formatBytes(job.total)}` : formatBytes(job.downloaded);
-  const eta = job.speed ? formatDuration((job.total - job.downloaded) / job.speed) : "";
-  const rate = job.status === "downloading"
-    ? [job.speed ? `${(job.speed / 1e6).toFixed(1)} MB/s` : "starting…", eta && `${eta} left`].filter(Boolean).join(" · ")
-    : "";
+  const { fraction, meta, rate } = describeJob(job);
+  el.querySelector(".mm-progress-fill").style.width = `${fraction * 100}%`;
+  el.querySelector(".mm-progress").setAttribute("aria-valuenow", Math.round(fraction * 100));
   el.querySelector(".mm-job-rate").textContent = rate;
-  const meta = {
-    downloading: [`${Math.floor(frac * 100)}%`, sizes],
-    queued: ["Waiting for a free slot", job.total && formatBytes(job.total)],
-    paused: ["Paused", sizes],
-    error: ["Failed", sizes],
-    done: ["Downloaded", formatBytes(job.total ?? job.downloaded)],
-    cancelled: ["Cancelled"],
-  }[job.status] ?? [job.status];
-  el.querySelector(".mm-job-meta").textContent = meta.filter(Boolean).join(" · ");
+  el.querySelector(".mm-job-meta").textContent = meta;
   el.querySelector(".mm-job-error").textContent = job.status === "error" ? job.error : "";
 
   const actions = el.querySelector(".mm-job-actions");
@@ -362,8 +297,7 @@ function updateJobElement(el, job) {
 
 function renderDownloads() {
   if (!ui) return;
-  const jobs = [...state.jobs].sort((a, b) =>
-    (STATUS_ORDER[a.status] ?? 9) - (STATUS_ORDER[b.status] ?? 9) || (b.finished ?? b.created) - (a.finished ?? a.created));
+  const jobs = sortJobs(state.jobs);
   const active = jobs.filter((j) => ACTIVE.has(j.status)).length;
   const finished = jobs.filter((j) => j.status === "done" || j.status === "cancelled").length;
   ui.downloadsCount.textContent = active ? `${active} active` : "";
@@ -383,7 +317,7 @@ function renderDownloads() {
 
 function renderModels() {
   if (!ui || !state.storage) return;
-  const inUse = namesInUse();
+  const inUse = namesInUse(currentWorkflow());
   const query = state.search.trim().toLowerCase();
   const models = state.storage.models.filter((m) => !query || `${m.directory}/${m.name}`.toLowerCase().includes(query));
   const largest = Math.max(1, ...state.storage.models.map((m) => m.size));
