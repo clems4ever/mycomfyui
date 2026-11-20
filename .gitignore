@@ -1,0 +1,5 @@
+# Models, outputs, custom nodes and user settings live here (mounted volumes)
+data/
+# Tokens for gated models (HF_TOKEN, CIVITAI_TOKEN)
+.env
+__pycache__/

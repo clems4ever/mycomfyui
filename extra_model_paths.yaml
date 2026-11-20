@@ -1,0 +1,5 @@
+# Custom nodes built into the image. They live outside custom_nodes/ because
+# that folder is a volume, which would hide anything the image puts there.
+builtin:
+  base_path: /opt/builtin_nodes
+  custom_nodes: .

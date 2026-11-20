@@ -1,0 +1,24 @@
+services:
+  comfyui:
+    build: .
+    image: comfyui:local
+    ports:
+      - "8188:8188"
+    environment:
+      # For gated Hugging Face / Civitai models; set them in a .env file next to this one
+      HF_TOKEN: ${HF_TOKEN:-}
+      CIVITAI_TOKEN: ${CIVITAI_TOKEN:-}
+    volumes:
+      - ./data/models:/opt/ComfyUI/models
+      - ./data/custom_nodes:/opt/ComfyUI/custom_nodes
+      - ./data/input:/opt/ComfyUI/input
+      - ./data/output:/opt/ComfyUI/output
+      - ./data/user:/opt/ComfyUI/user
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
