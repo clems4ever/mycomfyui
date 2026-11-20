@@ -23,6 +23,7 @@ RUN pip install -r requirements.txt -r manager_requirements.txt
 
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY model-manager /opt/builtin_nodes/model-manager
+COPY idle-unload /opt/builtin_nodes/idle-unload
 COPY extra_model_paths.yaml /opt/ComfyUI/extra_model_paths.yaml
 
 EXPOSE 8188

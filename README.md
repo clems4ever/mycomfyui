@@ -38,6 +38,12 @@ marked **in use**, and can be deleted to free space:
 For gated models (e.g. FLUX.1-dev), put `HF_TOKEN=hf_...` in a `.env` file next to
 `docker-compose.yml`.
 
+## GPU memory
+
+ComfyUI keeps models in VRAM between runs. Once nothing has run for 3 minutes, they are
+unloaded from the GPU (they stay cached in RAM, so the next run starts quickly). Set
+`IDLE_UNLOAD_MINUTES` in `.env` to change the delay, or to `0` to keep models loaded.
+
 > [!WARNING]
 > Anyone who can reach port 8188 can install custom nodes and download or delete models.
 > Keep it on a trusted network.

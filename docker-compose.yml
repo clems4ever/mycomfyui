@@ -8,6 +8,8 @@ services:
       # For gated Hugging Face / Civitai models; set them in a .env file next to this one
       HF_TOKEN: ${HF_TOKEN:-}
       CIVITAI_TOKEN: ${CIVITAI_TOKEN:-}
+      # Unload models from VRAM after this many idle minutes; 0 keeps them loaded
+      IDLE_UNLOAD_MINUTES: ${IDLE_UNLOAD_MINUTES:-3}
     volumes:
       - ./data/models:/opt/ComfyUI/models
       - ./data/custom_nodes:/opt/ComfyUI/custom_nodes
